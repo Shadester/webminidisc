@@ -10,7 +10,7 @@ import serviceRegistry from '../services/registry';
 import { Wireformat, getTracks } from 'netmd-js';
 import { AnyAction } from '@reduxjs/toolkit';
 import { getAvailableCharsForTrackTitle, framesToSec, sleepWithProgressCallback, sleep } from '../utils';
-import jsmediatags from 'jsmediatags';
+import * as mm from 'music-metadata-browser';
 import { TitleSourceType, TitleFormatType } from './convert-dialog-feature';
 
 export function control(action: 'play' | 'stop' | 'next' | 'prev' | 'goto', params?: unknown) {
@@ -243,36 +243,25 @@ export const WireformatDict: { [k: string]: Wireformat } = {
 
 async function getTrackNameFromMediaTags(file: File, titleFormat: TitleFormatType) {
     const fileData = await file.arrayBuffer();
-    return await new Promise<string>((resolve, reject) => {
-        jsmediatags.read(new Blob([fileData]), {
-            onSuccess: data => {
-                const title = data.tags.title ?? 'Unknown Title';
-                const artist = data.tags.artist ?? 'Unknown Artist';
-                const album = data.tags.album ?? 'Unknown Album';
-                switch (titleFormat) {
-                    case 'title': {
-                        resolve(title);
-                        break;
-                    }
-                    case 'artist-title': {
-                        resolve(`${artist} - ${title}`);
-                        break;
-                    }
-                    case 'album-title': {
-                        resolve(`${album} - ${title}`);
-                        break;
-                    }
-                    case 'artist-album-title': {
-                        resolve(`${artist} - ${album} - ${title}`);
-                        break;
-                    }
-                }
-            },
-            onError: error => {
-                reject(error);
-            },
-        });
-    });
+    const blob = new Blob([new Uint8Array(fileData)]);
+    let metadata = await mm.parseBlob(blob);
+    const title = metadata.common.title ?? 'Unknown Title';
+    const artist = metadata.common.artist ?? 'Unknown Artist';
+    const album = metadata.common.album ?? 'Unknown Album';
+    switch (titleFormat) {
+        case 'title': {
+            return title;
+        }
+        case 'artist-title': {
+            return `${artist} - ${title}`;
+        }
+        case 'album-title': {
+            return `${album} - ${title}`;
+        }
+        case 'artist-album-title': {
+            return `${artist} - ${album} - ${title}`;
+        }
+    }
 }
 
 export function convertAndUpload(files: File[], format: string, titleSource: TitleSourceType, titleFormat: TitleFormatType) {
@@ -281,10 +270,14 @@ export function convertAndUpload(files: File[], format: string, titleSource: Tit
         const wireformat = WireformatDict[format];
 
         await netmdService?.stop();
-        dispatch(uploadDialogActions.setVisible(true));
+        dispatch(batchActions([uploadDialogActions.setVisible(true), uploadDialogActions.setCancelUpload(false)]));
 
         const updateProgressCallback = ({ written, encrypted, total }: { written: number; encrypted: number; total: number }) => {
             dispatch(uploadDialogActions.setWriteProgress({ written, encrypted, total }));
+        };
+
+        const hasUploadBeenCancelled = () => {
+            return getState().uploadDialog.cancelled;
         };
 
         let trackUpdate: {
@@ -309,7 +302,7 @@ export function convertAndUpload(files: File[], format: string, titleSource: Tit
 
             let i = 0;
             function convertNext() {
-                if (i === files.length) {
+                if (i === files.length || hasUploadBeenCancelled()) {
                     trackUpdate.converting = i;
                     trackUpdate.titleConverting = ``;
                     updateTrack();
@@ -356,12 +349,16 @@ export function convertAndUpload(files: File[], format: string, titleSource: Tit
         let errorMessage = ``;
         let i = 1;
         for await (let item of conversionIterator(files)) {
+            if (hasUploadBeenCancelled()) {
+                break;
+            }
+
             const { file, data } = item;
 
             let title = file.name;
             if (titleSource === 'media') {
                 try {
-                    title = await getTrackNameFromMediaTags(file, titleFormat);
+                    title = (await getTrackNameFromMediaTags(file, titleFormat)) ?? file.name;
                 } catch (err) {
                     console.error(err);
                 }
